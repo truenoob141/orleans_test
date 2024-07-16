@@ -1,57 +1,37 @@
-﻿using GrainInterfaces;
+﻿using System.Security.Cryptography;
+using System.Text;
+using GrainInterfaces;
+using Microsoft.Extensions.Logging;
 
 namespace Client;
 
-public class GameController : IGameObserver
+public class GameController : IPlayerObserver
 {
     private readonly IGrainFactory _grainFactory;
 
-    private TaskCompletionSource<Guid> _waitGame;
-    private TaskCompletionSource<GameOutcome> _waitResult;
+    private TaskCompletionSource<Guid> _waitGameStarted;
+    private TaskCompletionSource<(Guid, int)> _waitResult;
 
-    private readonly Guid _playerId = Guid.NewGuid();
+    private Guid _playerId;
 
     public GameController(IGrainFactory grainFactory)
     {
+        _playerId = Guid.NewGuid();
         _grainFactory = grainFactory;
     }
-
-    public void OnGameStarted(Guid gameId)
-    {
-        Console.WriteLine($"Game Started {gameId}");
-        _waitGame?.SetResult(gameId);
-    }
-
-    public void OnGameFinished(Guid gameId, GameOutcome outcome)
-    {
-        Console.WriteLine($"Game Finished {gameId}, Result {outcome}");
-        _waitResult?.SetResult(outcome);
-    }
-
-    // public async Task<Guid> FindGame()
-    // {
-    //     if (_waitGame != null)
-    //         throw new ApplicationException("Already waiting for a game");
-    //
-    //     _waitGame = new TaskCompletionSource<Guid>();
-    //     var matcherGrain = _grainFactory.GetGrain<IMatcherWorkerGain>(Guid.Empty);
-    //     await matcherGrain.FindGame(this);
-    //     return await _waitGame.Task;
-    // }
     
     public async Task<Guid> FindGame()
     {
-        if (_waitGame != null)
-            throw new ApplicationException("Already waiting for a game");
+        _waitGameStarted?.TrySetCanceled();
+        _waitGameStarted = new TaskCompletionSource<Guid>();
 
-        _waitGame = new TaskCompletionSource<Guid>();
+        var observerReference = _grainFactory.CreateObjectReference<IPlayerObserver>(this);
 
-        // Создание ссылки на наблюдателя
-        var observerReference = _grainFactory.CreateObjectReference<IGameObserver>(this);
+        var matcherGrain = _grainFactory.GetGrain<IMatchmakerGrain>(Guid.Empty);
+        await matcherGrain.AddPlayerToQueue(_playerId, observerReference);
 
-        var matcherGrain = _grainFactory.GetGrain<IMatcherWorkerGain>(Guid.Empty);
-        await matcherGrain.FindGame(observerReference);
-        return await _waitGame.Task;
+        // _logger.LogInformation("Wait a game...");
+        return await _waitGameStarted.Task;
     }
 
     public Task<int> GetScore()
@@ -60,24 +40,37 @@ public class GameController : IGameObserver
         return player.GetScore();
     }
 
-    public async Task<GameOutcome> MakeMove(Guid id, int value)
+    public async Task<(Guid, int)> SendNumber(Guid roomId, int value)
     {
-        if (_waitResult != null)
-            throw new ApplicationException("Already move");
+        _waitResult?.TrySetCanceled();
+        _waitResult = new TaskCompletionSource<(Guid, int)>();
 
-        _waitResult = new TaskCompletionSource<GameOutcome>();
+        var room = _grainFactory.GetGrain<IRoomGrain>(roomId);
+        await room.SubmitNumber(_playerId, value);
 
-        var game = _grainFactory.GetGrain<IGameGrain>(id);
-        var move = new GameMove { PlayerId = _playerId, Value = value };
-        Console.WriteLine("Wait make move");
-        await game.MakeMove(move);
-
-        Console.WriteLine("Wait result");
+        // _logger.LogInformation("Wait result...");
         return await _waitResult.Task;
     }
 
-    public Task<Guid> GetPlayerId()
+    public Guid GetPlayerId()
     {
-        return Task.FromResult(_playerId);
+        return _playerId;
+    }
+
+    public void SetPlayerId(string input)
+    {
+        using var md5 = MD5.Create();
+        byte[] hash = md5.ComputeHash(Encoding.UTF8.GetBytes(input));
+        _playerId = new Guid(hash);
+    }
+
+    public void OnGameStarted(Guid roomId)
+    {
+        _waitGameStarted?.TrySetResult(roomId);
+    }
+
+    public void OnGameResult(Guid playerId, int winValue)
+    {
+        _waitResult?.TrySetResult((playerId, winValue));
     }
 }
